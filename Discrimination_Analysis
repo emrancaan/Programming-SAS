@@ -1,0 +1,60 @@
+options validvarname=any;proc import out = multi  datafile = "/opt/sas/data/galero/TESTS/Multi.csv"  dbms = csv   replace;     getnames = Yes;  Datarow = 2; run;
+/*   I. DATA PREPARATION     
+Univariate Analysis on all the variables, we found that the dataset has many missing ValuesCleaned and outliers removed 
+*/
+Data multi_Ren;  SET multi;  rename SeriousDlqin2yrs = Sdl2    RevolvingUtilizationOfUnsecuredL = RUL    age = AgeY    DebtRatio = Debt    MonthlyIncome = Incom    NumberOfOpenCreditLinesAndLoans = OCLL    NumberOfTimes90DaysLate = Due90    NumberRealEstateLoansOrLines = RELL   NumberOfTime30_59DaysPastDueNotW = Due3059  NumberOfTime60_89DaysPastDueNotW = Due6089  NumberOfDependents = Depen; run; 
+ ods graphics on;  
+ Data Cleaned_Multi;  set multi_Ren;    if Incom = "NA" then delete;       if Depen = "NA" then delete;    if RUL > 5 then delete;    if 18 > AgeY > 90 then delete;    if Debt > 7 then delete;    if OCLL > 24 then delete;    if RELL > 30 then delete;    if Incom > 100000 then delete;    if Depen > 10 then delete; run;  
+ data Cleaned_Multi;   set Cleaned_Multi;   Income = Incom * 1;   Depend = Depen * 1;   drop incom depen; run;  /*
+II. DATA STANDARIZATION   
+After cleaning the data, we standardized the data with mean=0 and std deviation=1 except for the binary dependent variable.
+*/
+ proc standard data=Cleaned_Multi mean=0 std=1 out=zCrRisk;  var RUL AgeY Due3059 Debt Income OCLL Due90 RELL Due6089 Depend;  run;  
+ proc corr data=zCrRisk ;  var RUL AgeY Due3059 Debt Income OCLL Due90 RELL Due6089 Depend;  run; 
+ /*
+ III. Principal Component Analysis INDPENDENT VARIABLES: RUL AgeY Due3059 Debt Income OCLL Due90 RELL Due6089 DependDEPENDENT  VARIABLES: Sdl2
+Because number of independent variables is highReducing the dimensions using techniques such as Principal Component Analysis
+*/
+ proc princomp data=zCrRisk out=princout;  var RUL AgeY Due3059 Debt Income OCLL Due90 RELL Due6089 Depend;  run; 
+/*
+IV. Factor Analysis
+Factor is a combination of Independent variable Four Factors are choosen as the commulative variance they makeup 74% so rest of the sixindependent var are dropped. 
+As Four Factors are choosen so nfactors=4 for Factor Analysis.Following rotation mentods are used to check varience 
+ 1) varimax 2) quartimin
+are used to check "which of the four factors can be considered as KEY FACTORS?"
+"Variance Explained by Each Factor" for both rotation methods is nearly SAME so we will consider quartimin results.
+Factors can be named as Factor1 = Financial DistressFactor2 = Funding RequirmentFactor3 = Expandable IncomeFactor4 = LifeStyle */
+proc factor data = zCrRisk method = principal rotate = varimax score   mineigen=1 nfactors=4  residuals eigenvectors out=factout outstat=fact;   var RUL AgeY Due3059 Debt Income OCLL Due90 RELL Due6089 Depend; run; 
+/* *//*proc factor data = zCrRisk method = principal rotate = quartimin score  *//* mineigen=1 nfactors=4  residuals eigenvectors out=factout outstat=fact; *//*  var RUL AgeY Due3059 Debt Income OCLL Due90 RELL Due6089 Depend; *//*run;*/
+/*V. Splitting Data 
+70% observarions for Training Dataset30% observations for Testing Dataset*/
+ proc surveyselect data=factout samprate=0.70 seed=49201 out=jk outall   method=srs noprint;  run;   data training testing;  set jk;  if selected = 1 then output training;  else output testing;  drop selected;  run; 
+/*
+VI. Clustring and Classification
+Reason: Cluster analysis was done to get an idea how well the data was clustered on the         baises of factors  
+After that KNN , LDA and logistic regression models were created using training data.
+Finally Testing dataset was used to test the accuracy of Classification Models. 
+*/
+ods graphics on; proc fastclus data=Factout maxc=2 maxiter=10 out=clus;     var Factor1 Factor2 Factor3 Factor4; run;  
+proc freq;     tables cluster*Sdl2; run;  
+proc candisc ncan = 2 out=can;     class cluster;     var Factor1 Factor2 Factor3 Factor4;     title3 'Canonical Discriminant Analysis of Clusters'; run;  
+proc sgplot data= can;     scatter y=Can2 x=Can1 / group=cluster;     title3 'Plot of clusters'; run;  
+dm "odsresults; clear"; 
+/*
+i-K Nearest  Neighbour(K N N) ClassificaionThe customer is calssified by a majority votes of it neighbours 
+*/ title; 
+proc discrim data = training method = npar k = 20   testdata = testing   testout = Test_Out;   class Sdl2;   var Factor1 Factor2 Factor3 Factor4; run;  
+dm "odsresults; clear"; 
+/*  ii-Linear Discriminant Anaysis (LDA)    LDA Works on the principle of increasing the distance between the means    of two groups or classifications.*/ 
+Title; proc discrim data=Training anova all distance outstat = dis method = normal pool=yes testdata = Testing TESTout = LDA_Out   crossvalidate outcross = cross1 mahalanobis posterr;   priors equal ;   class Sdl2;   var Factor1 Factor2 Factor3 Factor4; run;  
+proc print data = LDA_Out;
+/*
+iii-Applying Logistic Regression 
+Because dependent variable is binary therefore Logistic Regression will perform well.Logistic Regression is used for :
+1) to classify variable Sdl2 in two groups.2) to test which factors are important 3) to find probability of serious default in next two years.
+*/ 
+ods graphics on; proc logistic data=TESTING outest=betas covout plots(only)=(roc(id=obs) effect);   model Sdl2(event = '1') = RUL AgeY Due3059 Debt Income OCLL Due90 RELL Due6089 Depend       / selection=stepwise                       slentry=0.3                       slstay=0.35                       details                       lackfit;   output out=pred p=phat lower=lcl upper=ucl          predprob=(individual crossvalidate); run; ods graphics off; 
+proc sgplot data = PRED;  histogram Factor1 / transparency=.8  fillattrs = (color=yellow);    density Factor1 ; histogram Factor2 / transparency=.8  fillattrs = (color=lightGreen); density Factor2 ; histogram Factor3 / transparency=.8  fillattrs = (color=Red); density Factor3 ;/*  heatmap x=Factor1  y=Sdl2;*/ keylegend / location=inside position=topright across=1 noborder linelength=60;yaxis  offsetmin=0;run;
+ proc corr data=PRED;  var Factor1 Factor2 Factor3 Factor4 Sdl2;  run; 
+/**/
+Data DateValue;format dat date9. ; dat=21295; xdat=put(dat, date9.); sdc = quote(put(dat,date9.)) || 'd'; sdc1 = cats("'", put(dat, date9.), "'d");run;
