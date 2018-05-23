@@ -1,0 +1,553 @@
+
+**********************************************************************************************
+	  Program Purpose    : Cross Validation of Finrep Rules 
+
+	  Source Data        : Monthly Finrep dataset, datamart
+
+	  Output(s)          : SAS Report in Results Tab
+
+	  Author			 : Imran M.
+	  
+	  Date				 : 31/07/2017
+
+	  Change Log:	     :
+
+************************************************************************************************;
+
+/*LIBNAMES*/
+%include '/opt/sas/data/galero/Retail Credit/ROI/ROI - Mortgages/MI Development/SAS Macros/init.sas';
+%Let dsWithPerformHistory=FINREP_JUNE; 
+%Let dsWithRuleIds=FINREP_EXPANDED_JUN17;
+
+options nomprint nomlogic;
+
+%let ControlDate='01JUN2017'd;		*CURRENT REPORTING MONTH;
+%Let maxmt=%sysevalf(%sysfunc(intck(months,'01Nov2008'd,&ControlDate))+1); %put &maxmt;
+%let TestObs=100; *Sample size (Number of Test Obervations);
+proc datasets library=work kill nolist; run;
+
+****************************************************
+START:		 Select Sample Data 			:START
+****************************************************;
+
+proc surveyselect data = Other.&dsWithPerformHistory 
+   method = SRS  
+   sampsize = &TestObs  
+   out = FINREP_Sample;
+  run;
+
+%macro selectDataAndVars(datanm=,range=);
+
+	%if "&range." ^=%str() %then %do;
+		data Finrep5;
+		set &datanm. ;
+		keep &range.;
+		run;
+		%end;
+	%else %put Variables Not given.Assign param Range= values;
+%mend;
+*Select variables of interest from Sample Data;
+Data _null_;
+%selectDataAndVars
+		( datanm=FINREP_Sample, 
+		  Range =account_no_ UniqueCust_no FB_C_performance1-FB_C_performance&maxmt
+		  		Fb1-FB&maxmt IO1-IO&maxmt EverNPE CustDPD1-CustDPD&maxmt Extended_DPD1-Extended_DPD&maxmt IOTermPast1-IOTermPast&maxmt IOTermFuture1-IOTermFuture&maxmt
+		);
+run;
+
+******************************************************
+END:		 Select Sample Data 			   	  :END
+******************************************************;
+
+　
+*******************************************************
+START:	%VARLIST : macro to generate list of values &
+				   works with %TRANSITIONS 
+		   Input : listwithdash = A1-A5 
+		   output: A1 A2 A3 A4 A5
+*******************************************************;
+
+%MACRO VARLIST(listwithdash); 
+%local _before _after _length1 _length2 minlength samepos _pos  
+        _from _to i; 
+%local __startdt __retblank; 
+%let __startdt = %sysfunc(datetime()); 
+
+ 
+
+   %let _before = %scan(%quote(&listwithdash),1,-); 
+   %let _after  = %scan(%quote(&listwithdash),2,-); 
+   %let _length1 = %length(%quote(&_before)); 
+   %let _length2 = %length(%quote(&_after)); 
+   %let minlength=&_length1; 
+   %if &_length2 < &minlength %then %let minlength=&_length2; 
+ 
+
+ %*put before is &_before; 
+ %*put after is &_after; 
+ %*put minlength is &minlength; 
+   %* Stemlength should be just before the first number or the first  
+       unequal character; 
+   %let stemlength=0; 
+   %let foundit=0; 
+   %do _pos = 1 %to &minlength; 
+     %LET CHAR1=%upcase(%substr(%quote(&_before),&_pos,1)); 
+     %LET CHAR2=%upcase(%substr(%quote(&_after ),&_pos,1)); 
+     %if %index(1234567890,%QUOTE(&CHAR1)) GE 1 %then %let ISANUMBER=Y; 
+     %else %let isanumber=N; 
+ 
+
+     %if &foundit=0 and  
+          ( &isanumber=Y OR %quote(&CHAR1) NE %QUOTE(&CHAR2) ) 
+          %then %do; 
+              %let stemlength=%EVAL(&_pos-1); 
+              %*put   after assignment stemlength is &stemlength; 
+              %let foundit=1; 
+           %end; 
+   %end;  
+ 
+
+   %if &stemlength=0 %then %let stem=; 
+   %else %let stem = %substr(&_before,1,&stemlength); 
+ 
+
+   %let _from=%substr(&_before,%eval(&stemlength+1)); 
+   %let _to  =%substr(&_after, %eval(&stemlength+1)); 
+ 
+
+ %IF %verify(&_FROM,1234567890)>0 or 
+     %verify(&_TO  ,1234567890)>0 %then  
+   %PUT ERROR in VARLIST macro: Alphabetic prefixes are different; 
+   
+ %else %if &_from <= &_to %then 
+ %do _III_=&_from %to &_to; 
+     %LET _XXX_=&_iii_; 
+     %do _JJJ_=%length(&_iii_) %to %eval(%length(&_from)-1); 
+         %let _XXX_=0&_XXX_; 
+     %end; 
+ %TRIM(&stem&_XXX_) 
+ %end;  
+ %else %PUT ERROR in VARLIST macro: From "&_from" not <= To "&_to";
+%put Macro VARLIST finished in %sysfunc(putn(%sysevalf(%sysfunc(datetime()) - &__startdt), tod.)); 
+ %MEND;  
+
+　
+　
+************************************************************
+START:	
+%TRANSITIONS : Macro to Record Performance Transitions 
+
+ Input Parameters: 
+
+ arraypos 	= N/A 
+ array		=%VARLIST(Performance1-Performance&maxmt)
+ data		=Dataset containing values to load into the array 
+ var		=Historical Performance Array values  to be inni_
+ 			 tialised in an array defined in [array=] above
+ values		= N/A 
+ 			  (VALUES can be a numbered list, eg 1-10, a01-A20,  
+              a feature which can be turned off with NUMLIST=N )
+ DELIM 		= N/A
+ 			  (Character used to separate values in VALUES 
+ 				parameter. Blank is default)
+ DEBUG 		=(Default=N.  If Y, debugging statements are activated)
+
+ NUMLIST 	= N/A
+ 			(Default=Y.  If Y, VALUES may be a number list.)	   	 
+				
+ output:	 
+ 			Dataset TransData 
+*************************************************************;
+
+%MACRO TRANSITIONS(arraypos, array=, data=, var=, values=,
+                       delim=%STR( ), debug=N, varlist=Y);
+  
+
+%LOCAL prefixes PREFIXN manum _VAR_N iter i J val VAR WHICH MINLENG
+   PREFIX1 PREFIX2 PREFIX3 PREFIX4 PREFIX5 PREFIX6 PREFIX7 PREFIX8 
+   PREFIX9 PREFIX10 PREFIX11
+   var1 var2 var3 var4 var5 var6 var7 var8 var9 var10 var11 ;
+%local __startdt __retblank; 
+%let __startdt = %sysfunc(datetime()); 
+
+%* Get array names from either the keyword or positional parameter;
+%if &ARRAY= %then %let PREFIXES=&ARRAYPOS;
+%else %let PREFIXES=&ARRAY;
+
+%* Parse the list of macro array names;
+%do MANUM = 1 %to 9999; 
+ %let prefix&MANUM=%scan(&prefixes,&MAnum,' ');
+ %if &&prefix&MANUM ne %then 
+   %DO;
+    %let PREFIXN=&MAnum;
+    	%global &&prefix&MANUM..N;
+    %* initialize length to zero;
+    %let &&prefix&MANUM..N=0;
+   %END;
+  %else %goto out1;
+%end; 
+%out1:
+
+%if &DEBUG=Y %then %put PREFIXN is &PREFIXN;
+
+%* Parse the VAR parameter;
+%let _VAR_N=0;
+%do MANUM = 1 %to 9999; 
+ %let _var_&MANUM=%scan(&VAR,&MAnum,' ');
+ %if %str(&&_var_&MANUM) ne %then %let _VAR_N=&MAnum;
+ %else %goto out2;
+%end; 
+%out2:
+
+%IF &PREFIXN=0 %THEN 
+    %PUT ERROR: No macro array names are given;
+%ELSE %IF %LENGTH(%STR(&DATA)) >0 and &_VAR_N=0 %THEN
+    %PUT ERROR: DATA parameter is used but VAR parameter is blank;
+%ELSE %IF %LENGTH(%STR(&DATA)) >0 and &_VAR_N ne &PREFIXN %THEN
+    %PUT ERROR: The number of variables in the VAR parameter is not 
+ equal to the number of arrays;
+%ELSE %DO;
+
+%*------------------------------------------------------;
+%*  CASE 1: VALUES parameter is used;
+%*------------------------------------------------------;
+
+%IF %LENGTH(%STR(&VALUES)) >0 %THEN 
+%DO;
+     %IF &VARLIST=Y %then
+     %DO;
+         %* Check for numbered list of form xxx-xxx and expand it using
+             the VARLIST macro.;
+         %IF (%INDEX(%quote(&VALUES),-) GT 0) and 
+             (%length(%SCAN(%quote(&VALUES),1,-))>0) and 
+             (%length(%SCAN(%quote(&VALUES),2,-))>0) and 
+             (%length(%SCAN(%quote(&VALUES),3,-))=0) 
+           %THEN %LET VALUES=%VARLIST(&VALUES);
+     %END;
+
+%LET MINLENG=99999;
+%DO J=1 %TO &PREFIXN;
+%DO ITER=1 %TO 9999;  
+  %LET WHICH=%EVAL((&ITER-1)*&PREFIXN +&J); 
+  %LET VAL=%SCAN(%STR(&VALUES),&WHICH,%STR(&DELIM));
+  %IF %QUOTE(&VAL) NE %THEN
+    %DO;
+        %GLOBAL &&&&PREFIX&J..&ITER;
+      %LET &&&&PREFIX&J..&ITER=&VAL;
+      %LET &&&&PREFIX&J..N=&ITER;
+    %END;
+  %ELSE %goto out3;
+%END; 
+%out3: %IF &&&&&&PREFIX&J..N LT &MINLENG
+          %THEN %LET MINLENG=&&&&&&PREFIX&J..N;
+%END;
+
+%if &PREFIXN >1 %THEN 
+%DO J=1 %TO &PREFIXN;
+    %IF &&&&&&PREFIX&J..N NE &MINLENG %THEN 
+%PUT ERROR: Number of values must be a multiple of the number of arrays;
+%END;
+
+%END;
+%ELSE %DO;
+
+%*------------------------------------------------------;
+%*  CASE 2: DATA and VAR parameters used
+%*------------------------------------------------------;
+
+%* Get values from one or more variables in a dataset or view;
+  data _null_;
+  set &DATA end = lastobs;
+%DO J=1 %to &PREFIXN; 
+     call execute('%GLOBAL '||"&&PREFIX&J.."||"_"||left(put(_n_,5.)) );
+  	 call symput(compress("&&prefix&J"||"_"||left(put(_n_,8.))), 
+              trim(left(put(&&_VAR_&J,8.))));
+  if lastobs then 
+    call symput(compress("&&prefix&J"||"_N"), trim(left(put(_n_,8.))));
+%END;
+  run ;
+
+%* Write message to the log;
+%IF &DEBUG=N %then
+%DO J=1 %to &PREFIXN;
+ %PUT &&&&PREFIX&J..N is &&&&&&PREFIX&J..N;
+ %END;
+
+	%* Write transitions with Months values for respective observation to Dataset TransData ;
+	 	
+		  Data TransData;
+
+			%Do N = 1 %to &TestObs;
+				
+				  %DO J = 1 %to &PREFIXN-1;
+						%let	x = %eval(&J+1);
+						%IF &&&&&&prefix&J.._&N ne &&&&&&prefix&x.._&N %then %do;
+
+							%*PUT "<-----------"||&N||"----------------";
+							%*PUT Account Transitioned from &&&&&&prefix&J.._&N to  &&&&&&prefix&x.._&N in Month &X ;
+							%*PUT '----------------------------->';
+							 ObsNo=&N;
+							 Month=&X; 
+                             From=&&&&&&prefix&J.._&N;
+							 To=&&&&&&prefix&x.._&N;
+							 output;
+		 					%END;
+						
+						%Else;
+					 
+				  %END;
+				  
+				
+           %END;
+		 Run;
+%END;
+%END;
+%PUT Macro TRANSITIONS finished in %sysfunc(putn(%sysevalf(%sysfunc(datetime()) - &__startdt), tod.)); 
+%MEND;
+
+　
+　
+*******************************************************
+START:          %Finrep_Data:   
+	  Macro for Cross validations of rules 
+*******************************************************;
+
+%Macro Finrep_Data;
+
+proc sql;
+     create table Test_tbl as
+     select account_no_ , Month, Rule
+     from TransData4
+     order by account_no_ , Month
+    ;quit;
+
+	proc sql;
+     select count(*) into :rowNum
+     from Test_tbl
+   ;quit;
+
+　
+　
+   	%do i=1 %to &rowNum;
+			proc sql noprint;
+			select account_no_, Month, Rule_ID  into :AccNo, :runMonth, :RuleID
+            from TransData4 
+            where monotonic() between &i and &i  
+        	;quit;
+		 %if &i=1 %then %do;
+			proc sql outobs=0;
+				create table FinRepTrans AS	
+				 select account_no_ , 0 AS UniqueCustomer, Month, Rule AS Rule_Finrep
+			     from TransData4
+			    ;quit;
+	     %end;
+		 %PUT Account_no_: &AccNo;
+		 %PUT Month :&runMonth;
+		 %PUT Rule_ID: &RuleID;
+			
+		proc sql;
+			create table FinRepRules as
+			select 	Account_no_ , UniqueCustomer, &runMonth as Month, &RuleID as Rule_Finrep
+			from Other.&dsWithRuleIds
+			where account_no_ = &AccNo 
+		;quit;	
+
+		proc append base=FinRepTrans data=FinRepRules force;
+		proc sql; drop table FinRepRule ;quit;
+
+	%end;
+
+%mend;
+
+*******************************************************
+         %Finrep_Data							:END  
+*******************************************************;
+
+　
+data _null_;
+
+	set Finrep5;
+
+	%TRANSITIONS( 
+	array=%VARLIST(Performance1-Performance&maxmt)   ,
+	data=Finrep5,
+	var= %VARLIST(FB_C_Performance1-FB_C_Performance&maxmt),
+    debug=Y); 
+
+Run;
+
+Data TransData1 (keep=ObsNo account_no_ UniqueCust_no Def_Flag  Fb1-FB&maxmt IO1-IO&maxmt EverNPE CustDPD1-CustDPD&maxmt Extended_DPD1-Extended_DPD&maxmt IOTermPast1-IOTermPast&maxmt IOTermFuture1-IOTermFuture&maxmt);
+    set FINREP5;
+	ObsNo=_N_ ;
+Run;
+
+Data TransData2;
+		Merge Transdata (in=A) TransData1 ;
+		By ObsNo;
+		If A Then output;
+		A=0;
+Run;
+
+　
+*******************************************************
+  *Rules applied in Test envoirnment ;
+*******************************************************;
+Data TransData3;
+array Extended_DPD{&maxmt};
+array FB{&maxmt};
+array IO{&maxmt};
+array IOTermPast{&maxmt};
+array IOTermFuture{&maxmt};
+	Set TransData2;
+		If From=92 And To=6 Then DO;
+		     Rule=36;
+		End;
+		Else If From = 6 and To = 1 Then Do; 
+		     Rule=11;
+		End;
+		Else IF  From = 90 and To = 1 Then Do;
+			 Rule = 20;
+		End;
+		Else IF From in (0,1) and To = 90 Then Do;
+			  Rule = 2;
+		End;
+			
+		Else IF  From in (0,1) and To = 6 Then Do;	
+		 	 If Extended_DPD{Month}<30 Then Rule=3; 
+		 	 Else if (Extended_DPD{Month}>= 30 and Extended_DPD{Month}<90) Then Rule=5;
+		End;
+
+		Else IF  From = 90 and To = 92 and FB{Month}=1 Then Do;
+		  if   Extended_DPD{Month}>=90  Then Rule=21;
+		  else Rule=22;
+		END;
+
+　
+		Else If (From in (0,1) and To = 92 ) Then Do;
+
+			If FB{Month}=1 Then Do;	
+				IF  Extended_DPD{Month}<30 then 
+						do;
+						if ((Month > 100 and io{Month}=1) and sum(IOTermPast{Month},IOTermFuture{Month})> 24) Then Rule=4; Else Rule=3;
+						end;
+				 Else If (Extended_DPD{Month}>=30 and Extended_DPD{Month}<90) then do;
+							if  (Month > 100 and io{Month}=1 and sum(IOTermPast{Month},IOTermFuture{Month})> 24) Then Rule=6; Else Rule=5;
+							end;
+				 Else If  Extended_DPD{Month}>=90 then Rule=7;
+			END;
+			Else If FB{Month} in (.,0) Then Rule=2;
+			
+		End;
+
+　
+　
+		Else IF (From = 6 and To = 92) Then Do;
+
+				If FB{Month} in (.,0) Then Do; *No New FB;
+					If (((Extended_DPD{Month}>=30 and Extended_DPD{Month}<90)) and EverNPE = 1) Then Do;
+
+						IF  ((Month > 100 and io{Month}=1) and sum(IOTermPast{Month},IOTermFuture{Month})> 24) Then 
+						Rule=99; 
+						Else Rule=13; 
+						
+					end;
+					ELSE If Extended_DPD{Month}>=90 Then Rule=12;
+				End;
+				Else Do; * for New FB;
+					IF 	Extended_DPD{Month} >= 90 then do;
+					    Rule=18;
+					End;
+					Else If ((Month > 100 and io{Month}=1) and sum(IOTermPast{Month},IOTermFuture{Month})> 24) Then Rule=17;
+					Else If EverNPE = 1 Then Rule=15;
+				End;
+				
+		End;
+
+Run;
+
+*******************************************************
+*Dropping Exra variables from TransData3;
+*Concatinating 'Rule_ID' string with Month variable to Rule_ID variable.;
+*Vaiable Rule_ID is used in Macro %Finrep_Data;  
+*******************************************************;
+
+Data TransData4 (keep= account_no_  UniqueCust_no  Month  'FROM'n To  Rule Rule_ID);
+	set TransData3;
+	Rule_ID='Rule_ID'||trim(left(Month));
+run;
+*******************************************************
+   Finrep Rules 
+*******************************************************;
+
+Data _Null_;
+%Finrep_Data;
+Run;
+
+*******************************************************
+ No of Observation in FinRepTrans Must be equal to TransData4.
+ No of Obervations in Merged data set must be equal to the obervations in each of the above DataSets
+*******************************************************;
+Data  Merged_Dataset;
+   merge TransData4 
+         FinRepTrans (in = in2);
+   by account_no_ Month;
+   if in2;
+run;
+
+　
+****************************************************
+START:		 Final Report Ouput 
+****************************************************;
+
+Proc SQl noprint;
+Select Count(distinct account_no_) Into :AccountCount
+FROM Merged_Dataset;
+;Quit;
+
+　
+Proc sql print;
+Select 
+&TestObs As Total_Accounts,
+count(*) AS Total_Transitions_Spoted ,
+&AccountCount as in_Accounts
+from Merged_Dataset;
+run;
+
+proc Sql print;
+Create Table FinalReport_&maxmt As 
+SELECT  account_no_,  UniqueCust_no,  Month,  'FROM'n, To,  Rule , Rule_Finrep ,
+  		Case When Rule=Rule_Finrep Then 0 else 1 End AS Mismatchs
+FROM Merged_Dataset
+;Run;
+Proc SQL Print;
+SELECT 
+ CASE  Mismatchs 
+	WHEN 0 Then 'Matched' 
+	WHEN 1 Then 'Different'
+  END AS Rules_Applied
+,Count(*) AS Obs_Count
+FROM  FinalReport_&maxmt group by Mismatchs
+;QUIT;
+ 
+proc report data=FinalReport_&maxmt colwidth=20 
+            spacing=5 headline  headskip;
+     column  account_no_ Month 'from'n  to Rule  Rule_Finrep Mismatchs;
+     define account_no_ / display;
+	 define Month / display;
+     define 'from'n / display;
+     define to / Display;
+	 define  Rule / display;
+     define Rule_Finrep / Display; 
+   compute Rule;
+     if Rule ne Rule_Finrep  then call define(_COL_,"style","style={background=lightgreen}");
+	 	else call define(_Row_,"style","style={background=pink}" );
+   endcomp;
+   Where Mismatchs=1;
+run;
+
+****************************************************
+		 Final Report Ouput 					:END
+****************************************************;
+
+　
+　
